@@ -1,16 +1,14 @@
 'use strict';
 var namespacedRequire = require('./lib/namespacedRequire');
 var _ = require('lodash');
-var Model = require('./lib/Model');
-var clientModel = Model.client;
-var db = require('./lib/db');
-var logger = require('./lib/Logger');
-var rpc = require('axon-rpc');
 var axon = require('axon');
 var rpc = require('axon-rpc');
 var mongoose = namespacedRequire('mongoose','client');
+var collectionMethods = ['ensureIndex','findAndModify','findOne','find','insert','save','update','getIndexes','mapReduce'];
 
 module.exports = mongoose;
+
+init();
 
 function init () {
 
@@ -20,11 +18,12 @@ function init () {
         mongoose.originalCreateConnection = mongoose.createConnection;
         mongoose.originalConnect = mongoose.connect;
         mongoose.originalModel = mongoose.model;
+        mongoose.createConnection = undefined;
+        mongoose.connect = undefined;
     }
-
+    
     mongoose.model = function (name, schema, collection, skipInit) {
-        var model = mongoose.originalModel.call(mongoose, name, schema, collection, skipInit);
-        clientModel(model);
+        var model = clientModel(mongoose.originalModel.call(mongoose, name, schema, collection, skipInit));
         if(model.schema.options.autoIndex){
             model.ensureIndexes();
         }
@@ -32,34 +31,38 @@ function init () {
         return model;
     };
 
-    mongoose.createConnection = function (rpcHost, database, callback) {
+    mongoose.createRemoteConnection = function (rpcHost, database, callback) {
         var connection = mongoose.originalCreateConnection.call(mongoose, database, {}, function () {
-            handleConnection(rpcHost, connection, callback);
+            handleConnection(rpcHost, database, connection, callback);
         });
         connection.model = mongoose.model;
         return connection;
     };
     
-    mongoose.connect = function (rpcHost, database, callback) {
+    mongoose.connectRemote = function (rpcHost, database, callback) {
         var connection = mongoose.originalConnect.call(mongoose, database, {}, function () {
-            handleConnection(rpcHost, connection.connection, callback);
+            handleConnection(rpcHost, database, connection.connection, callback);
         });
         connection.model = mongoose.model;
         mongoose.connection.model = mongoose.model;
         return connection;
     };
     
-    function handleConnection(rpcHost, connection, callback) {
+    function handleConnection(rpcHost, database, connection, callback) {
         connection.emit('connecting');
-        
-        console.log('connecting to rpc host', rpcHost);
-        
-        if (callback) {
-            //Always return true as we are faking it.
-            callback(null, connection);
-        }
-        connection.emit('connected');
-        connection.emit('open');
+        var sock = axon.socket('req');
+        var rpcClient = connection.rpcClient = new rpc.Client(sock);
+        var cb = _.once(callback||function(){});
+        sock.connect(rpcHost);
+        sock.once('error',function(err){
+            sock.close();
+            cb(err);
+        });
+        sock.once('connect',function(){
+            connection.emit('connected');
+            connection.emit('open');
+            cb(null,connection);
+        })
     }
     
     return mongoose;
